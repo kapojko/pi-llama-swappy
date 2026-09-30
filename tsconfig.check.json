@@ -6,11 +6,7 @@
     "moduleResolution": "nodenext",
     "target": "es2022",
     "skipLibCheck": true,
-    "paths": {
-      "@earendil-works/pi-ai": ["C:/Users/Юрий/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
-      "@earendil-works/pi-ai/compat": ["C:/Users/Юрий/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-ai/dist/compat.d.ts"],
-      "@earendil-works/pi-coding-agent": ["C:/Users/Юрий/.pi/agent/install/releases/0.87.1/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"]
-    }
+    "types": ["node"]
   },
   "files": ["extensions/llama-swappy/index.ts"]
 }

@@ -11,5 +11,14 @@
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": ">=0.87.1",
+    "@earendil-works/pi-coding-agent": ">=0.87.1",
+    "typescript": "*",
+    "@types/node": "*"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.check.json"
   }
 }

@@ -6,9 +6,14 @@
  * Configuration is done through Pi's built-in `/login` command:
  *   /login llama-swappy
  *
- * On startup (and on `/model` / `pi update --models`) the provider fetches
- * its catalog from the llama-swappy self-description endpoint:
- *   GET <endpoint>/llama-swappy/info
+ * llama-swappy serves two roots:
+ *   GET <base>/llama-swappy/info   — self-description (model catalog)
+ *   <base>/v1/...                  — OpenAI-compatible chat completions proxy
+ *
+ * The endpoint entered at /login is normalized to <base>/v1, so Pi's
+ * built-in openai-completions implementation requests
+ * <base>/v1/chat/completions. The catalog is always fetched from
+ * <base>/llama-swappy/info.
  */
 import {
   createProvider,
@@ -53,7 +58,16 @@ function normalizeEndpoint(endpoint: string | undefined): string | undefined {
       `Invalid llama-swappy endpoint: "${trimmed}" (expected e.g. http://127.0.0.1:12380)`,
     );
   }
-  return trimmed.replace(/\/+$/, "");
+  const noSlash = trimmed.replace(/\/+$/, "");
+  // llama-swappy's OpenAI proxy lives under /v1 and pi's
+  // openai-completions appends /chat/completions to the baseUrl, so the
+  // model baseUrl must end with /v1. Accept both input styles.
+  return noSlash.endsWith("/v1") ? noSlash : `${noSlash}/v1`;
+}
+
+/** Catalog URL: the info endpoint lives at the server root, not under /v1. */
+function infoUrl(endpoint: string): string {
+  return `${endpoint.replace(/\/v1$/, "")}${INFO_PATH}`;
 }
 
 /** Resolve the active endpoint: stored credential first, then ambient env. */
@@ -74,7 +88,7 @@ async function fetchSwappyInfo(
   apiKey: string | undefined,
   signal: AbortSignal,
 ): Promise<SwappyInfo> {
-  const url = `${endpoint}${INFO_PATH}`;
+  const url = infoUrl(endpoint);
   const response = await fetch(url, {
     signal,
     headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
@@ -128,7 +142,8 @@ export default function (pi: ExtensionAPI) {
           login: async (interaction) => {
             const endpointRaw = await interaction.prompt({
               type: "text",
-              message: "llama-swappy endpoint (e.g. http://127.0.0.1:12380)",
+              message:
+                "llama-swappy endpoint (e.g. http://127.0.0.1:12380) — /v1 is appended automatically",
             });
             const endpoint = normalizeEndpoint(endpointRaw);
             if (!endpoint) {
@@ -136,7 +151,7 @@ export default function (pi: ExtensionAPI) {
             }
             interaction.notify({
               type: "info",
-              message: `Fetching models from ${endpoint}${INFO_PATH}...`,
+              message: `Fetching models from ${infoUrl(endpoint)}...`,
             });
             const apiKey = (
               await interaction.prompt({
