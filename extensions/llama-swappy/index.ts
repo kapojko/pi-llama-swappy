@@ -6,8 +6,9 @@
  * Configuration is done through Pi's built-in `/login` command:
  *   /login llama-swappy
  *
- * llama-swappy serves two roots:
+ * llama-swappy serves three roots:
  *   GET <base>/llama-swappy/info   — self-description (model catalog)
+ *   POST <base>/llama-swappy/unload — unload the currently loaded model
  *   <base>/v1/...                  — OpenAI-compatible chat completions proxy
  *
  * The endpoint entered at /login is normalized to <base>/v1, so Pi's
@@ -21,7 +22,10 @@ import {
   type Model,
 } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 
 const PROVIDER_ID = "llama-swappy";
 const PROVIDER_NAME = "llama-swappy";
@@ -33,6 +37,7 @@ const ENV_ENDPOINT = "LLAMA_SWAPPY_ENDPOINT";
 const ENV_API_KEY = "LLAMA_SWAPPY_API_KEY";
 
 const INFO_PATH = "/llama-swappy/info";
+const UNLOAD_PATH = "/llama-swappy/unload";
 
 const DEFAULT_CONTEXT_WINDOW = 8192;
 
@@ -40,13 +45,21 @@ interface SwappyInfoModel {
   key: string;
   name?: string;
   contextSize?: number;
+  slots?: number;
   maxTokens?: number;
   reasoning?: boolean;
   input?: string[];
 }
 
+interface SwappyCurrentModel {
+  key: string;
+  name?: string;
+  secondsToUnload?: number;
+}
+
 interface SwappyInfo {
   version?: string;
+  current?: SwappyCurrentModel | null;
   models?: SwappyInfoModel[];
 }
 
@@ -65,9 +78,13 @@ function normalizeEndpoint(endpoint: string | undefined): string | undefined {
   return noSlash.endsWith("/v1") ? noSlash : `${noSlash}/v1`;
 }
 
-/** Catalog URL: the info endpoint lives at the server root, not under /v1. */
+/** Catalog/control URL: these endpoints live at the server root, not under /v1. */
+function controlUrl(endpoint: string, path: string): string {
+  return `${endpoint.replace(/\/v1$/, "")}${path}`;
+}
+
 function infoUrl(endpoint: string): string {
-  return `${endpoint.replace(/\/v1$/, "")}${INFO_PATH}`;
+  return controlUrl(endpoint, INFO_PATH);
 }
 
 /** Resolve the active endpoint: stored credential first, then ambient env. */
@@ -82,6 +99,14 @@ function getApiKey(credential: ApiKeyCredential | undefined): string | undefined
   return credential?.key?.trim() || process.env[ENV_API_KEY]?.trim() || undefined;
 }
 
+/** Hard cap for control requests, so a black-holed connection cannot hang the UI. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Combine a caller signal with a timeout for one request. */
+function requestSignal(signal: AbortSignal): AbortSignal {
+  return AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+}
+
 /** Fetch the llama-swappy self-description. */
 async function fetchSwappyInfo(
   endpoint: string,
@@ -90,7 +115,7 @@ async function fetchSwappyInfo(
 ): Promise<SwappyInfo> {
   const url = infoUrl(endpoint);
   const response = await fetch(url, {
-    signal,
+    signal: requestSignal(signal),
     headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
   });
   if (!response.ok) {
@@ -101,6 +126,53 @@ async function fetchSwappyInfo(
     throw new Error(`Unexpected /llama-swappy/info response: no "models" array`);
   }
   return data;
+}
+
+/**
+ * Resolve the active endpoint and API key for command handlers through the
+ * model registry, which re-runs the provider auth resolution (stored
+ * credential first, then ambient env) exactly like request-time auth.
+ */
+async function resolveSwappyAuth(
+  ctx: ExtensionCommandContext,
+): Promise<{ endpoint: string | undefined; apiKey: string | undefined }> {
+  let endpoint: string | undefined;
+  let apiKey: string | undefined;
+  try {
+    const auth = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
+    endpoint =
+      normalizeEndpoint(auth?.env?.[CRED_ENV_ENDPOINT]) ??
+      normalizeEndpoint(auth?.auth?.baseUrl);
+    apiKey = auth?.auth?.apiKey;
+  } catch {
+    // Registry not ready or provider unregistered; fall through to ambient env.
+  }
+  return {
+    endpoint: endpoint ?? normalizeEndpoint(process.env[ENV_ENDPOINT]),
+    apiKey: apiKey || process.env[ENV_API_KEY]?.trim() || undefined,
+  };
+}
+
+function formatUptime(seconds: number): string {
+  const m = Math.max(0, Math.round(seconds / 60));
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+}
+
+/** Format the model catalog for /llama-swappy list. */
+function formatModelList(info: SwappyInfo): string {
+  const models = info.models ?? [];
+  const lines = models.map((m) => {
+    const marker = info.current?.key === m.key ? "●" : " ";
+    const bits: string[] = [];
+    if (m.contextSize) bits.push(`ctx ${m.contextSize}`);
+    if (m.slots) bits.push(`slots ${m.slots}`);
+    if (m.maxTokens) bits.push(`max ${m.maxTokens}`);
+    if (m.reasoning) bits.push("reasoning");
+    const name = m.name && m.name !== m.key ? ` — ${m.name}` : "";
+    const meta = bits.length ? ` (${bits.join(", ")})` : "";
+    return `${marker} ${m.key}${name}${meta}`;
+  });
+  return [`llama-swappy models:`, ...lines].join("\n");
 }
 
 /** Map llama-swappy model metadata to Pi model definitions. */
@@ -121,6 +193,37 @@ function toPiModels(info: SwappyInfo, endpoint: string): Model<"openai-completio
     };
   });
 }
+
+/**
+ * Show a message to the user. In TUI/RPC this is a notification; in print
+ * mode ui.notify is a no-op, so fall back to stdout/stderr.
+ */
+function emit(
+  ctx: ExtensionCommandContext,
+  message: string,
+  type: "info" | "warning" | "error" = "info",
+) {
+  if (ctx.hasUI) {
+    ctx.ui.notify(message, type);
+  } else if (type === "error") {
+    console.error(message);
+  } else {
+    console.log(message);
+  }
+}
+
+const USAGE = [
+  "usage: /llama-swappy <subcommand>",
+  "  list    — show the model catalog (● = loaded on the server)",
+  "  info    — server version, loaded model, selected Pi model",
+  "  unload  — unload the currently loaded model to free VRAM",
+].join("\n");
+
+const SUBCOMMANDS = [
+  { value: "list", label: "list", description: "Show the model catalog" },
+  { value: "info", label: "info", description: "Server version, loaded model, Pi's selection" },
+  { value: "unload", label: "unload", description: "Unload the loaded model (free VRAM)" },
+];
 
 export default function (pi: ExtensionAPI) {
   // llama-swappy speaks OpenAI chat completions; delegate all request
@@ -220,4 +323,91 @@ export default function (pi: ExtensionAPI) {
       },
     }),
   );
+
+  pi.registerCommand("llama-swappy", {
+    description: "Manage models on the llama-swappy server (list, info, unload)",
+    getArgumentCompletions: (prefix) => {
+      const p = prefix.trim().toLowerCase();
+      // Complete only the first token; inside another token position return null.
+      if (p.includes(" ")) return null;
+      const matches = SUBCOMMANDS.filter((s) => s.value.startsWith(p));
+      return matches.length ? matches : SUBCOMMANDS;
+    },
+    handler: async (args, ctx) => {
+      const [sub] = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      if (!sub) {
+        emit(ctx, USAGE, "info");
+        return;
+      }
+
+      const { endpoint, apiKey } = await resolveSwappyAuth(ctx);
+      if (!endpoint) {
+        emit(ctx, 
+          "llama-swappy is not configured: run /login llama-swappy",
+          "error",
+        );
+        return;
+      }
+
+      try {
+        if (sub === "list" || sub === "info") {
+          const info = await fetchSwappyInfo(endpoint, apiKey, new AbortController().signal);
+          if (sub === "list") {
+            emit(ctx, formatModelList(info), "info");
+            return;
+          }
+          const loaded = info.current
+            ? `${info.current.name ?? info.current.key} (unloads in ~${formatUptime(info.current.secondsToUnload ?? 0)} of idle)`
+            : "none";
+          const selected =
+            ctx.model?.provider === PROVIDER_ID
+              ? `${ctx.model.provider}/${ctx.model.id}`
+              : (ctx.model ? `${ctx.model.provider}/${ctx.model.id} (not llama-swappy)` : "none");
+          emit(ctx, 
+            [
+              `llama-swappy @ ${infoUrl(endpoint)}`,
+              `server version: ${info.version ?? "unknown"}`,
+              `configured models: ${info.models?.length ?? 0}`,
+              `loaded on server: ${loaded}`,
+              `selected in pi:  ${selected}`,
+            ].join("\n"),
+            "info",
+          );
+          return;
+        }
+
+        if (sub === "unload") {
+          const url = controlUrl(endpoint, UNLOAD_PATH);
+          const response = await fetch(url, {
+            method: "POST",
+            signal: requestSignal(new AbortController().signal),
+            headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+          });
+          if (!response.ok) {
+            throw new Error(
+              `POST ${url} failed: ${response.status} ${response.statusText}`,
+            );
+          }
+          const data = (await response.json()) as { unloaded?: string | null };
+          emit(ctx, 
+            data.unloaded
+              ? `Unloaded ${data.unloaded}.`
+              : "No model was loaded.",
+            "info",
+          );
+          return;
+        }
+
+        emit(ctx, `Unknown subcommand "${sub}"\n${USAGE}`, "error");
+      } catch (err) {
+        let message = err instanceof Error ? err.message : String(err);
+        if (err instanceof Error && err.name === 'TimeoutError') {
+          message = `request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`;
+        } else if (err instanceof Error && err.name === 'AbortError') {
+          message = 'request aborted';
+        }
+        emit(ctx, `llama-swappy: ${message}`, 'error');
+      }
+    },
+  });
 }

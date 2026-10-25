@@ -15,6 +15,19 @@ provider:
   settings (`contextSize`, `maxTokens`, `reasoning`) from the llama-swappy
   self-description endpoint `GET <endpoint>/llama-swappy/info`.
 - **Cost is zero** — models run locally.
+- **`/llama-swappy` command** — manage the server from the chat:
+
+  ```
+  /llama-swappy list    # model catalog (● = loaded on the server)
+  /llama-swappy info    # server version, loaded model, selected Pi model
+  /llama-swappy unload  # unload the loaded model to free VRAM
+  ```
+
+  The subcommands hit `GET /llama-swappy/info` and `POST
+  /llama-swappy/unload` on the server using the same credentials as model
+  traffic. `unload` reports which model was stopped, or that none was
+  loaded. (Requires llama-swappy ≥ 1.4 for `unload`; `list` and `info`
+  work on 1.2+.)
 
 ## Configuration
 
