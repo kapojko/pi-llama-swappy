@@ -18,9 +18,10 @@ provider:
 - **`/llama-swappy` command** — manage the server from the chat:
 
   ```
-  /llama-swappy list    # model catalog (● = loaded on the server)
-  /llama-swappy info    # server version, loaded model, selected Pi model
-  /llama-swappy unload  # unload the loaded model to free VRAM
+  /llama-swappy providers  # manage instances (add, delete, inspect)
+  /llama-swappy list       # model catalog (● = loaded on the server)
+  /llama-swappy info       # server version, loaded model, selected Pi model
+  /llama-swappy unload     # unload the loaded model to free VRAM
   ```
 
   The subcommands hit `GET /llama-swappy/info` and `POST
@@ -29,12 +30,35 @@ provider:
   loaded. (Requires llama-swappy ≥ 1.4 for `unload`; `list` and `info`
   work on 1.2+.)
 
+## Multiple instances
+
+Besides the default `llama-swappy` provider you can register additional
+instances, e.g. a second machine or a remote server:
+
+```
+/llama-swappy providers   →  Add instance…
+```
+
+Each instance is registered as its own provider `llama-swappy-<name>`, so its
+models appear as `llama-swappy-<name>/<model-key>` in `/model` and its
+endpoint and API key can be changed with `/login llama-swappy-<name>` at any
+time. The instance list is persisted in `~/.pi/agent/llama-swappy.json`
+(honors `PI_CODING_AGENT_DIR`); the main provider is implicit and cannot be
+deleted.
+
+With more than one instance configured, `list`, `info` and `unload` ask which
+server to target (instance names plus `all`). You can also type the target
+directly — `/llama-swappy info local` — or `all` to aggregate over every
+instance. Deleting an instance does not remove its entry from Pi's
+`auth.json`; `/logout llama-swappy-<name>` cleans that up.
+
 ## Configuration
 
 Configure everything through Pi's built-in `/login` command:
 
 ```
-/login llama-swappy
+/login llama-swappy            # main instance
+/login llama-swappy-<name>     # extra instance (see "Multiple instances")
 ```
 
 You will be prompted for:

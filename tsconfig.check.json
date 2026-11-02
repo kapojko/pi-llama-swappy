@@ -4,6 +4,7 @@
     "noEmit": true,
     "module": "nodenext",
     "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
     "target": "es2022",
     "skipLibCheck": true,
     "types": ["node"]
