@@ -222,6 +222,7 @@ function formatModelList(info: SwappyInfo, label?: string): string {
     if (m.slots) bits.push(`slots ${m.slots}`);
     if (m.maxTokens) bits.push(`max ${m.maxTokens}`);
     if (m.reasoning) bits.push("reasoning");
+    if (m.input?.includes("image")) bits.push("vision");
     const name = m.name && m.name !== m.key ? ` — ${m.name}` : "";
     const meta = bits.length ? ` (${bits.join(", ")})` : "";
     return `${marker} ${m.key}${name}${meta}`;
@@ -280,7 +281,7 @@ function describeTarget(providerId: string): string {
 const USAGE = [
   "usage: /llama-swappy <subcommand>",
   "  providers — manage llama-swappy instances (add, delete, inspect)",
-  "  list      — show the model catalog (● = loaded on the server)",
+  "  list      — show the model catalog (● = loaded, vision = accepts images)",
   "  info      — server version, loaded model, selected Pi model",
   "  unload    — unload the currently loaded model to free VRAM",
   "",

@@ -19,7 +19,7 @@ provider:
 
   ```
   /llama-swappy providers  # manage instances (add, delete, inspect)
-  /llama-swappy list       # model catalog (● = loaded on the server)
+  /llama-swappy list       # model catalog (● = loaded, vision = accepts images)
   /llama-swappy info       # server version, loaded model, selected Pi model
   /llama-swappy unload     # unload the loaded model to free VRAM
   ```
