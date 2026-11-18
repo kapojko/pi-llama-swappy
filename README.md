@@ -20,7 +20,7 @@ provider:
   ```
   /llama-swappy providers  # manage instances (add, delete, inspect)
   /llama-swappy list       # model catalog (● = loaded, vision = accepts images)
-  /llama-swappy info       # server version, loaded model, selected Pi model
+  /llama-swappy info       # server version, loaded model, poweroff state, selected Pi model
   /llama-swappy monitor    # hardware status: GPU, CPU, RAM, NVMe
   /llama-swappy unload     # unload the loaded model to free VRAM
   ```
@@ -40,6 +40,12 @@ provider:
   and, when llama-swappy's `monitor.logDir` logging is configured,
   today's and this week's maxima. Fields the platform or driver does not
   provide are omitted.
+
+  `info` also reports the server's idle poweroff state — `disabled`,
+  counting with a countdown, `waiting` (no model has been
+  loaded+unloaded yet), `initiated` or `failed` with the error
+  (requires llama-swappy ≥ 1.10; the line is omitted on older
+  servers).
 
   (Requires llama-swappy ≥ 1.4 for `unload`; `list` and `info` work on
   1.2+.)

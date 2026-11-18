@@ -70,10 +70,40 @@ interface SwappyCurrentModel {
   secondsToUnload?: number;
 }
 
+// Idle poweroff state (llama-swappy ≥ 1.10); the server always sends
+// the object ("disabled" when off), so absence means an older server.
+interface SwappyPoweroff {
+  enabled: boolean;
+  idleSeconds?: number;
+  status?: string; // "disabled" | "waiting" | "counting" | "initiated" | "failed"
+  secondsLeft?: number;
+  note?: string;
+  error?: string;
+}
+
 interface SwappyInfo {
   version?: string;
   current?: SwappyCurrentModel | null;
+  poweroff?: SwappyPoweroff;
   models?: SwappyInfoModel[];
+}
+
+/** One line about the idle poweroff state; empty for older servers. */
+function formatPoweroff(p: SwappyPoweroff | undefined): string {
+  if (!p) return "";
+  if (!p.enabled) return "poweroff: disabled";
+  switch (p.status) {
+    case "counting":
+      return `poweroff: on — powers off in ~${formatUptime(p.secondsLeft ?? 0)} (after ${p.idleSeconds ?? "?"}s idle)`;
+    case "waiting":
+      return "poweroff: on — waiting (counting starts after first model load+unload)";
+    case "initiated":
+      return "poweroff: on — poweroff command executed, system should be shutting down";
+    case "failed":
+      return `poweroff: FAILED — counting stopped${p.error ? `: ${p.error}` : ""}`;
+    default:
+      return `poweroff: on — status ${p.status ?? "unknown"}${p.note ? ` (${p.note})` : ""}`;
+  }
 }
 
 // Hardware monitoring types mirror llama-swappy's internal/monitor package.
@@ -522,7 +552,7 @@ const USAGE = [
   "usage: /llama-swappy <subcommand>",
   "  providers — manage llama-swappy instances (add, delete, inspect)",
   "  list      — show the model catalog (● = loaded, vision = accepts images)",
-  "  info      — server version, loaded model, selected Pi model",
+  "  info      — server version, loaded model, poweroff state, selected Pi model",
   "  monitor   — hardware status: GPU, CPU, RAM, NVMe (llama-swappy ≥ 1.5)",
   "  unload    — unload the currently loaded model to free VRAM",
   "",
@@ -534,7 +564,7 @@ const USAGE = [
 const SUBCOMMANDS = [
   { value: "providers", label: "providers", description: "Manage llama-swappy instances" },
   { value: "list", label: "list", description: "Show the model catalog" },
-  { value: "info", label: "info", description: "Server version, loaded model, Pi's selection" },
+  { value: "info", label: "info", description: "Server version, loaded model, poweroff, Pi's selection" },
   { value: "monitor", label: "monitor", description: "Hardware status (GPU, CPU, RAM, NVMe)" },
   { value: "unload", label: "unload", description: "Unload the loaded model (free VRAM)" },
 ];
@@ -960,13 +990,16 @@ export default function (pi: ExtensionAPI) {
       ctx.model?.provider === target.providerId
         ? `${ctx.model.provider}/${ctx.model.id}`
         : (ctx.model ? `${ctx.model.provider}/${ctx.model.id} (not ${describeTarget(target.providerId)})` : "none");
-    return [
+    const lines = [
       `${describeTarget(target.providerId)} @ ${infoUrl(endpoint)}`,
       `server version: ${info.version ?? "unknown"}`,
       `configured models: ${info.models?.length ?? 0}`,
       `loaded on server: ${loaded}`,
       `selected in pi:  ${selected}`,
-    ].join("\n");
+    ];
+    const poweroff = formatPoweroff(info.poweroff);
+    if (poweroff) lines.push(poweroff);
+    return lines.join("\n");
   }
 
   /** Unload one target, returning a human-readable result line. */
