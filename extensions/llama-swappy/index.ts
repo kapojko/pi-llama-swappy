@@ -9,10 +9,11 @@
  * provider (`llama-swappy-<name>`) with its own `/login` entry, and the list
  * is persisted in `<agent-dir>/llama-swappy.json`.
  *
- * llama-swappy serves three roots:
- *   GET <base>/llama-swappy/info   — self-description (model catalog)
+ * llama-swappy serves four roots:
+ *   GET <base>/llama-swappy/info    — self-description (model catalog)
  *   POST <base>/llama-swappy/unload — unload the currently loaded model
- *   <base>/v1/...                  — OpenAI-compatible chat completions proxy
+ *   GET <base>/llama-swappy/monitor — optional hardware monitoring (≥ 1.5)
+ *   <base>/v1/...                   — OpenAI-compatible chat completions proxy
  *
  * The endpoint entered at /login is normalized to <base>/v1, so Pi's
  * built-in openai-completions implementation requests
@@ -49,6 +50,7 @@ const ENV_API_KEY = "LLAMA_SWAPPY_API_KEY";
 
 const INFO_PATH = "/llama-swappy/info";
 const UNLOAD_PATH = "/llama-swappy/unload";
+const MONITOR_PATH = "/llama-swappy/monitor";
 
 const DEFAULT_CONTEXT_WINDOW = 8192;
 
@@ -72,6 +74,64 @@ interface SwappyInfo {
   version?: string;
   current?: SwappyCurrentModel | null;
   models?: SwappyInfoModel[];
+}
+
+// Hardware monitoring types mirror llama-swappy's internal/monitor package.
+// Fields a platform or driver does not provide are omitted by the server.
+interface MonitorGPU {
+  index: number;
+  name?: string;
+  tempC?: number;
+  junctionTempC?: number;
+  memTempC?: number;
+  utilPct?: number;
+  vramUsedMiB?: number;
+  vramTotalMiB?: number;
+  powerW?: number;
+  fanRpm?: number;
+  fanPct?: number;
+  smClkMHz?: number;
+  smClkMaxMHz?: number;
+  memClkMHz?: number;
+  memClkMaxMHz?: number;
+}
+
+interface MonitorCPU {
+  utilPct?: number;
+  tempC?: number;
+}
+
+interface MonitorRAM {
+  usedMiB?: number;
+  totalMiB?: number;
+  swapUsedMiB?: number;
+  swapTotalMiB?: number;
+}
+
+interface MonitorNVMe {
+  name: string;
+  tempC?: number;
+  readBps?: number;
+  writeBps?: number;
+}
+
+interface MonitorSample {
+  ts?: string;
+  gpus?: MonitorGPU[];
+  cpu?: MonitorCPU;
+  ram?: MonitorRAM;
+  nvmes?: MonitorNVMe[];
+  model?: string;
+}
+
+interface MonitorStatus {
+  enabled: boolean;
+  reason?: string;
+  now?: MonitorSample;
+  avgMinute?: MonitorSample;
+  maxDay?: MonitorSample;
+  maxWeek?: MonitorSample;
+  historyAvailable?: boolean;
 }
 
 function normalizeEndpoint(endpoint: string | undefined): string | undefined {
@@ -179,6 +239,32 @@ async function unloadSwappy(
   return data.unloaded ?? null;
 }
 
+/** Fetch the hardware monitoring status (llama-swappy ≥ 1.5). */
+async function fetchSwappyMonitor(
+  endpoint: string,
+  apiKey: string | undefined,
+  signal: AbortSignal,
+): Promise<MonitorStatus> {
+  const url = controlUrl(endpoint, MONITOR_PATH);
+  const response = await fetch(url, {
+    signal: requestSignal(signal),
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+  });
+  if (response.status === 404) {
+    throw new Error(
+      `server does not provide /llama-swappy/monitor (llama-swappy < 1.5?)`,
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`);
+  }
+  const data = (await response.json()) as MonitorStatus;
+  if (typeof data.enabled !== "boolean") {
+    throw new Error(`Unexpected /llama-swappy/monitor response: no "enabled" flag`);
+  }
+  return data;
+}
+
 /**
  * Resolve the active endpoint and API key for command handlers through the
  * model registry, which re-runs the provider auth resolution (stored
@@ -210,6 +296,160 @@ async function resolveSwappyAuth(
 function formatUptime(seconds: number): string {
   const m = Math.max(0, Math.round(seconds / 60));
   return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+}
+
+// ----------------------------------------------------------------------
+// Hardware monitoring formatting (/llama-swappy monitor)
+// ----------------------------------------------------------------------
+
+function fmtTemp(c: number): string {
+  return `${Math.round(c)}°C`;
+}
+
+/** MiB to GiB with one decimal; empty string when the value is absent. */
+function fmtGiB(mib: number | undefined): string {
+  return mib === undefined ? "" : `${(mib / 1024).toFixed(1)}`;
+}
+
+/** Bytes/second to MB/s with one decimal. */
+function fmtMbps(bps: number | undefined): string {
+  return bps === undefined ? "" : `${(bps / 1e6).toFixed(1)}`;
+}
+
+/**
+ * One or two detail lines per GPU (kept short so they never wrap on a
+ * normal terminal): the name on the first line, sensors second, clocks
+ * (the throttle witness) third when present. Absent fields are omitted.
+ */
+function formatGpuLines(g: MonitorGPU): string[] {
+  const name = g.name?.trim() ? ` ${g.name}` : "";
+  const lines = [`GPU ${g.index}${name}`];
+  const main: string[] = [];
+  if (g.tempC !== undefined) {
+    const extra: string[] = [];
+    if (g.junctionTempC !== undefined) extra.push(`junc ${Math.round(g.junctionTempC)}`);
+    if (g.memTempC !== undefined) extra.push(`mem ${Math.round(g.memTempC)}`);
+    main.push(fmtTemp(g.tempC) + (extra.length ? ` (${extra.join(", ")})` : ""));
+  } else {
+    if (g.junctionTempC !== undefined) main.push(`junc ${fmtTemp(g.junctionTempC)}`);
+    if (g.memTempC !== undefined) main.push(`mem ${fmtTemp(g.memTempC)}`);
+  }
+  if (g.utilPct !== undefined) main.push(`${Math.round(g.utilPct)}% util`);
+  if (g.vramUsedMiB !== undefined) {
+    const total = g.vramTotalMiB !== undefined ? `/${fmtGiB(g.vramTotalMiB)}` : "";
+    main.push(`VRAM ${fmtGiB(g.vramUsedMiB)}${total} GiB`);
+  }
+  if (g.powerW !== undefined) main.push(`${Math.round(g.powerW)} W`);
+  if (g.fanPct !== undefined) main.push(`fan ${g.fanPct}%`);
+  else if (g.fanRpm !== undefined) main.push(`fan ${g.fanRpm} rpm`);
+  if (main.length) lines.push(`  ${main.join(", ")}`);
+  const clocks: string[] = [];
+  if (g.smClkMHz !== undefined) {
+    const max = g.smClkMaxMHz !== undefined ? `/${g.smClkMaxMHz}` : "";
+    clocks.push(`sm ${g.smClkMHz}${max} MHz`);
+  }
+  if (g.memClkMHz !== undefined) {
+    const max = g.memClkMaxMHz !== undefined ? `/${g.memClkMaxMHz}` : "";
+    clocks.push(`mem ${g.memClkMHz}${max} MHz`);
+  }
+  if (clocks.length) lines.push(`  ${clocks.join(", ")}`);
+  return lines;
+}
+
+/** One compact line for a whole sample (avgMinute / maxDay / maxWeek). */
+function formatSampleSummary(s: MonitorSample): string {
+  const bits: string[] = [];
+  if (s.gpus?.length) {
+    bits.push(
+      s.gpus
+        .map((g) => {
+          const p: string[] = [];
+          if (g.tempC !== undefined) p.push(fmtTemp(g.tempC));
+          if (g.utilPct !== undefined) p.push(`${Math.round(g.utilPct)}%`);
+          if (g.vramUsedMiB !== undefined) p.push(`${fmtGiB(g.vramUsedMiB)} GiB VRAM`);
+          if (g.powerW !== undefined) p.push(`${Math.round(g.powerW)} W`);
+          if (g.fanPct !== undefined) p.push(`fan ${g.fanPct}%`);
+          else if (g.fanRpm !== undefined) p.push(`fan ${g.fanRpm} rpm`);
+          return `GPU${g.index}${p.length ? ` ${p.join(" ")}` : ""}`;
+        })
+        .join(", "),
+    );
+  }
+  if (s.cpu) {
+    const p: string[] = [];
+    if (s.cpu.utilPct !== undefined) p.push(`${Math.round(s.cpu.utilPct)}%`);
+    if (s.cpu.tempC !== undefined) p.push(fmtTemp(s.cpu.tempC));
+    if (p.length) bits.push(`CPU ${p.join(" ")}`);
+  }
+  if (s.ram?.usedMiB !== undefined) bits.push(`RAM ${fmtGiB(s.ram.usedMiB)} GiB`);
+  return bits.length ? bits.join(" | ") : "no data";
+}
+
+/** Format one enabled monitor status into a human-readable block. */
+function formatMonitorBlock(status: MonitorStatus): string {
+  const now = status.now;
+  if (!now) return "monitoring enabled but no sample yet";
+  const lines: string[] = [];
+  lines.push(`model: ${now.model === "idle" || !now.model ? "idle" : now.model}`);
+  for (const g of now.gpus ?? []) lines.push(...formatGpuLines(g));
+  if (now.cpu) {
+    const p: string[] = [];
+    if (now.cpu.utilPct !== undefined) p.push(`${Math.round(now.cpu.utilPct)}%`);
+    if (now.cpu.tempC !== undefined) p.push(fmtTemp(now.cpu.tempC));
+    if (p.length) lines.push(`CPU: ${p.join(", ")}`);
+  }
+  if (now.ram) {
+    const ram = now.ram;
+    if (ram.usedMiB !== undefined) {
+      const total = ram.totalMiB !== undefined ? `/${fmtGiB(ram.totalMiB)}` : "";
+      const swap =
+        ram.swapUsedMiB !== undefined
+          ? ` (swap ${fmtGiB(ram.swapUsedMiB)}${ram.swapTotalMiB !== undefined ? `/${fmtGiB(ram.swapTotalMiB)}` : ""} GiB)`
+          : "";
+      lines.push(`RAM: ${fmtGiB(ram.usedMiB)}${total} GiB${swap}`);
+    }
+  }
+  const nvmes = now.nvmes ?? [];
+  const withData = nvmes.filter(
+    (n) => n.tempC !== undefined || n.readBps !== undefined || n.writeBps !== undefined,
+  );
+  for (const n of withData) {
+    const p: string[] = [];
+    if (n.tempC !== undefined) p.push(fmtTemp(n.tempC));
+    if (n.readBps !== undefined) p.push(`R ${fmtMbps(n.readBps)} MB/s`);
+    if (n.writeBps !== undefined) p.push(`W ${fmtMbps(n.writeBps)} MB/s`);
+    lines.push(`${n.name}: ${p.join(", ")}`);
+  }
+  const bare = nvmes.length - withData.length;
+  if (bare > 0) {
+    lines.push(
+      withData.length
+        ? `NVMe: ${bare} other drive${bare > 1 ? "s" : ""} report no sensors or throughput`
+        : `NVMe: ${bare} drive${bare > 1 ? "s" : ""} (no sensors or throughput reported)`,
+    );
+  }
+  if (status.avgMinute) lines.push(`1-min avg: ${formatSampleSummary(status.avgMinute)}`);
+  if (status.maxDay) lines.push(`day max:   ${formatSampleSummary(status.maxDay)}`);
+  if (status.maxWeek) lines.push(`week max:  ${formatSampleSummary(status.maxWeek)}`);
+  return lines.join("\n");
+}
+
+/** Format /llama-swappy monitor for one target. */
+async function monitorFor(
+  ctx: ExtensionCommandContext,
+  target: SwappyTarget,
+  apiKey: string | undefined,
+): Promise<string> {
+  const { endpoint } = await resolveSwappyAuth(ctx, target.providerId, target.instance);
+  if (!endpoint) {
+    return `${describeTarget(target.providerId)}: not configured (run /login ${target.providerId})`;
+  }
+  const status = await fetchSwappyMonitor(endpoint, apiKey, new AbortController().signal);
+  const header = `${describeTarget(target.providerId)} @ ${controlUrl(endpoint, MONITOR_PATH)}`;
+  if (!status.enabled) {
+    return `${header}\nmonitoring disabled${status.reason ? `: ${status.reason}` : ""}`;
+  }
+  return `${header}\n${formatMonitorBlock(status)}`;
 }
 
 /** Format the model catalog for /llama-swappy list. */
@@ -283,6 +523,7 @@ const USAGE = [
   "  providers — manage llama-swappy instances (add, delete, inspect)",
   "  list      — show the model catalog (● = loaded, vision = accepts images)",
   "  info      — server version, loaded model, selected Pi model",
+  "  monitor   — hardware status: GPU, CPU, RAM, NVMe (llama-swappy ≥ 1.5)",
   "  unload    — unload the currently loaded model to free VRAM",
   "",
   "With several instances configured, list/info/unload ask which server to",
@@ -294,11 +535,12 @@ const SUBCOMMANDS = [
   { value: "providers", label: "providers", description: "Manage llama-swappy instances" },
   { value: "list", label: "list", description: "Show the model catalog" },
   { value: "info", label: "info", description: "Server version, loaded model, Pi's selection" },
+  { value: "monitor", label: "monitor", description: "Hardware status (GPU, CPU, RAM, NVMe)" },
   { value: "unload", label: "unload", description: "Unload the loaded model (free VRAM)" },
 ];
 
 /** Subcommands that accept an instance target as second token. */
-const TARGETED_SUBCOMMANDS = new Set(["list", "info", "unload"]);
+const TARGETED_SUBCOMMANDS = new Set(["list", "info", "monitor", "unload"]);
 
 interface SwappyTarget {
   /** "all" aggregates over every registered instance. */
@@ -739,7 +981,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("llama-swappy", {
-    description: "Manage models on llama-swappy servers (providers, list, info, unload)",
+    description: "Manage models on llama-swappy servers (providers, list, info, monitor, unload)",
     getArgumentCompletions: (argumentText) => {
       const text = argumentText.trimStart().toLowerCase();
       if (!text.includes(" ")) {
@@ -749,7 +991,7 @@ export default function (pi: ExtensionAPI) {
       // Second token: complete instance names (and "all") for targeted
       // subcommands. pi-tui replaces the whole argument text with item.value,
       // so the value repeats the subcommand.
-      const match = text.match(/^(list|info|unload)\s+(\S*)$/);
+      const match = text.match(/^(list|info|monitor|unload)\s+(\S*)$/);
       if (!match) return null;
       const [, sub, namePrefix] = match;
       const names = [...allTargets().map((t) => t.name), "all"];
@@ -812,6 +1054,8 @@ export default function (pi: ExtensionAPI) {
                 blocks.push(formatModelList(info, label));
               } else if (sub === "info") {
                 blocks.push(await infoFor(ctx, target, apiKey));
+              } else if (sub === "monitor") {
+                blocks.push(await monitorFor(ctx, target, apiKey));
               } else {
                 blocks.push(await unloadFor(target, endpoint, apiKey));
               }

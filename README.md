@@ -21,14 +21,28 @@ provider:
   /llama-swappy providers  # manage instances (add, delete, inspect)
   /llama-swappy list       # model catalog (● = loaded, vision = accepts images)
   /llama-swappy info       # server version, loaded model, selected Pi model
+  /llama-swappy monitor    # hardware status: GPU, CPU, RAM, NVMe
   /llama-swappy unload     # unload the loaded model to free VRAM
   ```
 
-  The subcommands hit `GET /llama-swappy/info` and `POST
-  /llama-swappy/unload` on the server using the same credentials as model
-  traffic. `unload` reports which model was stopped, or that none was
-  loaded. (Requires llama-swappy ≥ 1.4 for `unload`; `list` and `info`
-  work on 1.2+.)
+  The subcommands hit `GET /llama-swappy/info`, `GET
+  /llama-swappy/monitor` and `POST /llama-swappy/unload` on the server
+  using the same credentials as model traffic. `unload` reports which
+  model was stopped, or that none was loaded.
+
+  `monitor` shows the server's hardware heartbeat (requires llama-swappy
+  ≥ 1.5, and a `monitor` section enabled in its config; otherwise it
+  reports that monitoring is disabled or that the server predates the
+  endpoint). Per GPU it lists temperatures (NVIDIA: one sensor; AMD: edge,
+  junction and memory), utilization, VRAM used/total, power, fan, and the
+  core/memory clock current/max pairs — the throttle witness — followed by
+  CPU, RAM and per-NVMe temperature/throughput, plus a 1-minute average
+  and, when llama-swappy's `monitor.logDir` logging is configured,
+  today's and this week's maxima. Fields the platform or driver does not
+  provide are omitted.
+
+  (Requires llama-swappy ≥ 1.4 for `unload`; `list` and `info` work on
+  1.2+.)
 
 ## Multiple instances
 
@@ -46,7 +60,8 @@ time. The instance list is persisted in `~/.pi/agent/llama-swappy.json`
 (honors `PI_CODING_AGENT_DIR`); the main provider is implicit and cannot be
 deleted.
 
-With more than one instance configured, `list`, `info` and `unload` ask which
+With more than one instance configured, `list`, `info`, `monitor` and
+`unload` ask which
 server to target (instance names plus `all`). You can also type the target
 directly — `/llama-swappy info local` — or `all` to aggregate over every
 instance. Deleting an instance does not remove its entry from Pi's

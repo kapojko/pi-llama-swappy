@@ -1,6 +1,6 @@
 {
   "name": "pi-llama-swappy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pi extension that adds a llama-swappy provider (OpenAI-compatible proxy in front of llama.cpp servers)",
   "keywords": ["pi-package"],
   "license": "MIT",
